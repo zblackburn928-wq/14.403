@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>14.02 History R/W — preview</title>
+<style>
+  html, body { margin:0; padding:0; background:#0b0d10; color:#c8ced8;
+    font:15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  #state { padding:10px 14px; font-size:20px; font-weight:700; }
+  #state.bad { color:#d08a7f; }
+  #state.run { color:#d8c07f; }
+  #prev { padding:0 14px 8px; font:12px/1.4 Consolas, monospace; color:#7a8494; }
+  #banner { margin:10px 14px; padding:10px 12px; border:1px solid #d08a7f;
+    background:#1a1114; color:#e8b4a8; border-radius:4px;
+    font:12px/1.45 Consolas, monospace; }
+  #log { margin:0; padding:10px 14px; white-space:pre-wrap;
+    font:12px/1.45 Consolas, monospace; background:#11151b;
+    border-top:1px solid #1e2732; min-height:52vh; overflow-y:auto; }
+  #frameNote { margin:10px 14px; padding:10px 12px; border:1px solid #1e2732;
+    background:#0e1116; color:#7a8494; border-radius:4px;
+    font:12px/1.45 Consolas, monospace; }
+  .dim { color:#7a8494; }
+</style>
+</head>
+<body>
+<div id="state" class="bad">FAILED — FW 14.02 (WebKit patched)</div>
+<div id="prev">previous run reached: stage1-build</div>
+<div id="banner">PREVIEW / MOCKUP — this is what the page reports on 14.02.
+  The HTML/CSS is identical to the 14.00 page; only the JS outcome changes.
+  This is not a working exploit.</div>
+<pre id="log">UA  Mozilla/5.0 (PlayStation 4/14.02) AppleWebKit/... Safari/...
+START  firmware 14.02 browser primitive
+WINDOWS  map=4194304 scan=4194304 anchor=2097152
+STAGE1-VIEW  valid=false len=n/a offset=n/a backing=8
+FAIL  forged view did not appear (14.02 WebKit trigger patched)
+HEN14  exploit failed; payload check only
+HEN14-PAYLOAD  verified 562240 bytes sha256=29ec095f... first=0xe9
+HEN14-KEXEC  HEN14-KEXEC-REFUSED missing: kernel primitive object</pre>
+<div id="frameNote">research/exploit.html would render here (iframe), same as on
+  14.00, but its entry page would also report the patched trigger.</div>
+</body>
+</html>

