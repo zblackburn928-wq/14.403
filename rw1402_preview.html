@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>14.02 run — preview</title>
+<style>
+  html, body { margin:0; padding:0; background:#0b0d10; color:#c8ced8;
+    font:15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  #state { padding:10px 14px; font-size:20px; font-weight:700; }
+  #state.bad { color:#d08a7f; }
+  #state.run { color:#d8c07f; }
+  #prev { padding:0 14px 8px; font:12px/1.4 Consolas, monospace; color:#7a8494; }
+  #banner { margin:10px 14px; padding:10px 12px; border:1px solid #d8c07f;
+    background:#1a1710; color:#e0cf9a; border-radius:4px;
+    font:12px/1.45 Consolas, monospace; }
+  #log { margin:0; padding:10px 14px; white-space:pre-wrap;
+    font:12px/1.45 Consolas, monospace; background:#11151b;
+    border-top:1px solid #1e2732; min-height:52vh; overflow-y:auto; }
+  .dim { color:#7a8494; }
+</style>
+</head>
+<body>
+<div id="state" class="bad">FAILED — stage 1 (14.02 trigger may be patched)</div>
+<div id="prev">previous run reached: stage1-build</div>
+<div id="banner">PREVIEW — this is the expected 14.02 output now that
+  PS4["14.02"] is wired (14.00 gadget + kernel tables, marked unverified).
+  If stage 1 fails, nothing was written. If it passes, the kernel stage runs
+  14.00 addresses on a 14.02 kernel — unverified, so a wrong RVA panics.</div>
+<pre id="log">UA  Mozilla/5.0 (PlayStation 4/14.02) AppleWebKit/... Safari/...
+BUILD  jb=skipjb2 base=ef1670a
+FW  14.02
+FW-STATUS  state=14.02-unverified webkit=14.00-gadget-table kernel=14.00-hx-tables src=ps4-suid-scanner-main/1402_offsets.txt note=cssfontface-uaf-may-be-patched
+FW-KTABLE  idt_rsvd=undefined prison0=0x111fa18 rootvnode=0x2136e90 kpatch=1400.bin payload=payload.bin src=ps4_offsets.js
+PRIMITIVE-OK
+BASES  webkit=0x... libkernel=0x...
+STAGE1-VIEW  valid=false len=n/a offset=n/a backing=8
+FAIL  forged view did not appear (14.02 WebKit trigger patched)
+HEN14  exploit failed; payload check only
+HEN14-KEXEC  HEN14-KEXEC-REFUSED missing: kernel primitive object</pre>
+</body>
+</html>
